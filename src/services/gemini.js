@@ -13,14 +13,17 @@ const CODE_EXEC_TOOL = { codeExecution: {} };
 export const CODE_KEYWORDS = /\b(plot|chart|graph|analyz|statistic|regression|correlat|histogram|visualiz|calculat|compute|run code|write code|execute|pandas|numpy|matplotlib|csv|data)\b/i;
 
 let cachedPrompt = null;
+let promptLoadedAt = 0;
+const PROMPT_CACHE_MS = 30000;
 
 async function loadSystemPrompt() {
-  if (cachedPrompt) return cachedPrompt;
+  if (cachedPrompt && (Date.now() - promptLoadedAt) < PROMPT_CACHE_MS) return cachedPrompt;
   try {
     const res = await fetch('/prompt_chat.txt');
     cachedPrompt = res.ok ? (await res.text()).trim() : '';
+    promptLoadedAt = Date.now();
   } catch {
-    cachedPrompt = '';
+    cachedPrompt = cachedPrompt || '';
   }
   return cachedPrompt;
 }
@@ -152,11 +155,9 @@ export const chatWithYoutubeTools = async (history, newMessage, videos, executeF
   const basePrompt = await loadSystemPrompt();
   const systemInstruction = buildPersonalizedPrompt(basePrompt, firstName, lastName);
 
-  const toolDeclarations = YOUTUBE_TOOL_DECLARATIONS.filter(t => t.name !== 'generateImage');
-
   const model = genAI.getGenerativeModel({
     model: MODEL,
-    tools: [{ functionDeclarations: toolDeclarations }],
+    tools: [{ functionDeclarations: YOUTUBE_TOOL_DECLARATIONS }],
   });
 
   const baseHistory = history.map((m) => ({
@@ -200,8 +201,12 @@ export const chatWithYoutubeTools = async (history, newMessage, videos, executeF
     toolCalls.push({ name, args, result: toolResult });
     if (toolResult?._chartType) charts.push(toolResult);
 
+    const functionResponsePayload = toolResult?._needsGeneration
+      ? { result: { status: 'Image generation initiated', prompt: args.prompt } }
+      : { result: toolResult };
+
     response = (
-      await chat.sendMessage([{ functionResponse: { name, response: { result: toolResult } } }])
+      await chat.sendMessage([{ functionResponse: { name, response: functionResponsePayload } }])
     ).response;
   }
 
@@ -211,30 +216,41 @@ export const chatWithYoutubeTools = async (history, newMessage, videos, executeF
 // ── Image generation via Gemini ───────────────────────────────────────────────
 
 export const generateImageWithGemini = async (prompt, anchorImageParts = []) => {
-  const model = genAI.getGenerativeModel({
-    model: IMAGE_MODEL,
-    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-  });
+  const models = [IMAGE_MODEL, 'gemini-2.0-flash'];
 
-  const parts = [
-    { text: `Generate an image based on this description: ${prompt}` },
-    ...anchorImageParts.map((img) => ({
-      inlineData: { mimeType: img.mimeType || 'image/png', data: img.data },
-    })),
-  ];
+  for (const modelName of models) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+      });
 
-  const response = await model.generateContent(parts);
-  const resultParts = response.response.candidates?.[0]?.content?.parts || [];
+      const parts = [
+        { text: `Generate an image based on this description: ${prompt}` },
+        ...anchorImageParts.map((img) => ({
+          inlineData: { mimeType: img.mimeType || 'image/png', data: img.data },
+        })),
+      ];
 
-  for (const part of resultParts) {
-    if (part.inlineData) {
-      return {
-        mimeType: part.inlineData.mimeType,
-        data: part.inlineData.data,
-      };
+      const response = await model.generateContent(parts);
+      const resultParts = response.response.candidates?.[0]?.content?.parts || [];
+
+      for (const part of resultParts) {
+        if (part.inlineData) {
+          return {
+            mimeType: part.inlineData.mimeType,
+            data: part.inlineData.data,
+          };
+        }
+      }
+
+      const textPart = resultParts.find(p => p.text);
+      if (textPart) return { error: textPart.text };
+    } catch (err) {
+      console.warn(`Image generation with ${modelName} failed:`, err.message);
+      continue;
     }
   }
 
-  const textPart = resultParts.find(p => p.text);
-  return { error: textPart?.text || 'No image was generated. Try a different prompt.' };
+  return { error: 'Image generation is not available. The model may not support image output. Try a different prompt or check your API key permissions.' };
 };

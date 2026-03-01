@@ -316,6 +316,33 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
 
   const handleStop = () => { abortRef.current = true; };
 
+  // After YouTube tool calls, resolve any generateImage markers into real images
+  async function resolveImageGenerations(charts, imageParts) {
+    const resolved = [];
+    for (const chart of charts) {
+      if (chart._needsGeneration && chart._chartType === 'generated_image') {
+        try {
+          const result = await generateImageWithGemini(chart.prompt, imageParts);
+          if (result.error) {
+            resolved.push({ ...chart, _needsGeneration: false, error: result.error });
+          } else {
+            resolved.push({
+              _chartType: 'generated_image',
+              mimeType: result.mimeType,
+              data: result.data,
+              prompt: chart.prompt,
+            });
+          }
+        } catch (err) {
+          resolved.push({ ...chart, _needsGeneration: false, error: err.message });
+        }
+      } else {
+        resolved.push(chart);
+      }
+    }
+    return resolved;
+  }
+
   const handleSend = async () => {
     const text = input.trim();
     if ((!text && !images.length && !csvContext && !jsonContext) || streaming || !activeSessionId) return;
@@ -338,10 +365,7 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
     const hasJsonInSession = !!sessionJsonData;
     const needsBase64 = !!capturedCsv && wantPythonOnly;
 
-    const IMAGE_KEYWORDS = /\b(generate\s*(an?\s*)?image|create\s*(an?\s*)?image|draw|make\s*(an?\s*)?image|imagine|design\s*(an?\s*)?image)\b/i;
-    const wantImage = IMAGE_KEYWORDS.test(text);
-
-    const useYoutubeTools = hasJsonInSession && !wantPythonOnly && !wantCode && !wantImage;
+    const useYoutubeTools = hasJsonInSession && !wantPythonOnly && !wantCode;
     const useTools = !!sessionCsvRows && !wantPythonOnly && !wantCode && !capturedCsv && !hasJsonInSession;
     const useCodeExecution = wantPythonOnly || wantCode;
 
@@ -406,30 +430,7 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
     let toolCalls = [];
 
     try {
-      if (wantImage) {
-        setMessages((m) =>
-          m.map((msg) => msg.id === assistantId ? { ...msg, content: 'Generating image...' } : msg)
-        );
-        const result = await generateImageWithGemini(text, imageParts);
-        if (result.error) {
-          fullContent = result.error;
-        } else {
-          toolCharts = [{
-            _chartType: 'generated_image',
-            mimeType: result.mimeType,
-            data: result.data,
-            prompt: text,
-          }];
-          fullContent = `Here's the generated image based on your prompt.`;
-        }
-        setMessages((m) =>
-          m.map((msg) =>
-            msg.id === assistantId
-              ? { ...msg, content: fullContent, charts: toolCharts.length ? toolCharts : undefined }
-              : msg
-          )
-        );
-      } else if (useYoutubeTools) {
+      if (useYoutubeTools) {
         const videos = sessionJsonData.videos || sessionJsonData;
         const { text: answer, charts: returnedCharts, toolCalls: returnedCalls } = await chatWithYoutubeTools(
           history,
@@ -441,8 +442,20 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
           lastName,
         );
         fullContent = answer;
-        toolCharts = returnedCharts || [];
         toolCalls = returnedCalls || [];
+
+        // Resolve any generateImage markers into actual images
+        const rawCharts = returnedCharts || [];
+        const hasImageToGenerate = rawCharts.some(c => c._needsGeneration);
+        if (hasImageToGenerate) {
+          setMessages((m) =>
+            m.map((msg) => msg.id === assistantId ? { ...msg, content: 'Generating image...' } : msg)
+          );
+          toolCharts = await resolveImageGenerations(rawCharts, imageParts);
+        } else {
+          toolCharts = rawCharts;
+        }
+
         setMessages((m) =>
           m.map((msg) =>
             msg.id === assistantId
@@ -480,18 +493,25 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
           )
         );
       } else {
+        // Streaming path — search or code execution
+        let streamContent = '';
+        let streamParts = null;
         for await (const chunk of streamChat(history, promptForGemini, imageParts, useCodeExecution, firstName, lastName)) {
           if (abortRef.current) break;
           if (chunk.type === 'text') {
-            fullContent += chunk.text;
+            streamContent += chunk.text;
+            fullContent = streamContent;
+            const updatedContent = streamContent;
             setMessages((m) =>
-              m.map((msg) => (msg.id === assistantId ? { ...msg, content: fullContent } : msg))
+              m.map((msg) => (msg.id === assistantId ? { ...msg, content: updatedContent } : msg))
             );
           } else if (chunk.type === 'fullResponse') {
-            structuredParts = chunk.parts;
+            streamParts = chunk.parts;
+            structuredParts = streamParts;
+            const updatedParts = streamParts;
             setMessages((m) =>
               m.map((msg) =>
-                msg.id === assistantId ? { ...msg, content: '', parts: structuredParts } : msg
+                msg.id === assistantId ? { ...msg, content: '', parts: updatedParts } : msg
               )
             );
           } else if (chunk.type === 'grounding') {
@@ -677,6 +697,9 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
                 if (chart._chartType === 'generated_image' && chart.data) {
                   return <ImageViewer key={ci} src={`data:${chart.mimeType};base64,${chart.data}`} alt={chart.prompt} />;
                 }
+                if (chart._chartType === 'generated_image' && chart.error) {
+                  return <p key={ci} style={{ color: '#f87171', fontSize: '0.85rem' }}>{chart.error}</p>;
+                }
                 return null;
               })}
 
@@ -756,7 +779,7 @@ export default function Chat({ username, firstName, lastName, onLogout }) {
             <input
               ref={inputRef}
               type="text"
-              placeholder={sessionJsonData ? 'Ask about the YouTube channel data...' : 'Ask a question, drag a JSON file, or attach images…'}
+              placeholder={sessionJsonData ? 'Ask about the YouTube channel data…' : 'Ask a question, drag a JSON file, or attach images…'}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}

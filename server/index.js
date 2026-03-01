@@ -12,10 +12,8 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-const youtube = google.youtube({
-  version: 'v3',
-  auth: process.env.YOUTUBE_API_KEY || process.env.REACT_APP_GEMINI_API_KEY,
-});
+const YOUTUBE_KEY = process.env.YOUTUBE_API_KEY || process.env.REACT_APP_GEMINI_API_KEY;
+const youtube = google.youtube({ version: 'v3', auth: YOUTUBE_KEY });
 
 const URI = process.env.REACT_APP_MONGODB_URI || process.env.MONGODB_URI || process.env.REACT_APP_MONGO_URI;
 const DB = 'chatapp';
@@ -304,10 +302,15 @@ app.get('/api/youtube/download', async (req, res) => {
   const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
+    if (!YOUTUBE_KEY) {
+      send({ type: 'error', message: 'YouTube API key is not configured. Add YOUTUBE_API_KEY to your .env file.' });
+      return res.end();
+    }
+
     send({ type: 'status', message: 'Resolving channel...' });
     const channelId = await resolveChannelId(channelUrl);
     if (!channelId) {
-      send({ type: 'error', message: 'Could not find channel. Check the URL.' });
+      send({ type: 'error', message: 'Could not find channel. Check the URL and ensure YouTube Data API v3 is enabled for your API key.' });
       return res.end();
     }
 
@@ -346,7 +349,11 @@ app.get('/api/youtube/download', async (req, res) => {
     send({ type: 'complete', data: result });
   } catch (err) {
     console.error('YouTube download error:', err);
-    send({ type: 'error', message: err.message || 'Download failed' });
+    const msg = err.message || 'Download failed';
+    const hint = msg.includes('API key') || msg.includes('403')
+      ? ' Make sure YouTube Data API v3 is enabled in your Google Cloud Console for this API key.'
+      : '';
+    send({ type: 'error', message: msg + hint });
   }
   res.end();
 });
