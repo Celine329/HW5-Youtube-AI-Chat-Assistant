@@ -1,9 +1,11 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { CSV_TOOL_DECLARATIONS } from './csvTools';
+import { YOUTUBE_TOOL_DECLARATIONS } from './youtubeTools';
 
 const genAI = new GoogleGenerativeAI(process.env.REACT_APP_GEMINI_API_KEY || '');
 
 const MODEL = 'gemini-2.0-flash';
+const IMAGE_MODEL = 'gemini-2.0-flash-exp';
 
 const SEARCH_TOOL = { googleSearch: {} };
 const CODE_EXEC_TOOL = { codeExecution: {} };
@@ -23,23 +25,20 @@ async function loadSystemPrompt() {
   return cachedPrompt;
 }
 
-// Yields:
-//   { type: 'text', text }           — streaming text chunks
-//   { type: 'fullResponse', parts }  — when code was executed; replaces streamed text
-//   { type: 'grounding', data }      — Google Search metadata
-//
-// fullResponse parts: { type: 'text'|'code'|'result'|'image', ... }
-//
-// useCodeExecution: pass true to use codeExecution tool (CSV/analysis),
-//                   false (default) to use googleSearch tool.
-// Note: Gemini does not support both tools simultaneously.
-export const streamChat = async function* (history, newMessage, imageParts = [], useCodeExecution = false) {
-  const systemInstruction = await loadSystemPrompt();
+function buildPersonalizedPrompt(basePrompt, firstName, lastName) {
+  const nameCtx = (firstName || lastName)
+    ? `\n\nYou are currently talking to ${firstName || ''} ${lastName || ''}. Address them by their first name "${firstName}" warmly in your first message and throughout the conversation.`
+    : '';
+  return basePrompt + nameCtx;
+}
+
+// ── Streaming chat (search or code execution) ────────────────────────────────
+
+export const streamChat = async function* (history, newMessage, imageParts = [], useCodeExecution = false, firstName = '', lastName = '') {
+  const basePrompt = await loadSystemPrompt();
+  const systemInstruction = buildPersonalizedPrompt(basePrompt, firstName, lastName);
   const tools = useCodeExecution ? [CODE_EXEC_TOOL] : [SEARCH_TOOL];
-  const model = genAI.getGenerativeModel({
-    model: MODEL,
-    tools,
-  });
+  const model = genAI.getGenerativeModel({ model: MODEL, tools });
 
   const baseHistory = history.map((m) => ({
     role: m.role === 'user' ? 'user' : 'model',
@@ -48,10 +47,7 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
 
   const chatHistory = systemInstruction
     ? [
-        {
-          role: 'user',
-          parts: [{ text: `Follow these instructions in every response:\n\n${systemInstruction}` }],
-        },
+        { role: 'user', parts: [{ text: `Follow these instructions in every response:\n\n${systemInstruction}` }] },
         { role: 'model', parts: [{ text: "Got it! I'll follow those instructions." }] },
         ...baseHistory,
       ]
@@ -68,7 +64,6 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
 
   const result = await chat.sendMessageStream(parts);
 
-  // Stream text chunks for live display
   for await (const chunk of result.stream) {
     const chunkParts = chunk.candidates?.[0]?.content?.parts || [];
     for (const part of chunkParts) {
@@ -76,60 +71,35 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
     }
   }
 
-  // After stream: inspect all response parts
   const response = await result.response;
   const allParts = response.candidates?.[0]?.content?.parts || [];
 
   const hasCodeExecution = allParts.some(
-    (p) =>
-      p.executableCode ||
-      p.codeExecutionResult ||
-      (p.inlineData && p.inlineData.mimeType?.startsWith('image/'))
+    (p) => p.executableCode || p.codeExecutionResult || (p.inlineData && p.inlineData.mimeType?.startsWith('image/'))
   );
 
   if (hasCodeExecution) {
-    // Build ordered structured parts to replace the streamed text
     const structuredParts = allParts
       .map((p) => {
         if (p.text) return { type: 'text', text: p.text };
-        if (p.executableCode)
-          return {
-            type: 'code',
-            language: p.executableCode.language || 'PYTHON',
-            code: p.executableCode.code,
-          };
-        if (p.codeExecutionResult)
-          return {
-            type: 'result',
-            outcome: p.codeExecutionResult.outcome,
-            output: p.codeExecutionResult.output,
-          };
-        if (p.inlineData)
-          return { type: 'image', mimeType: p.inlineData.mimeType, data: p.inlineData.data };
+        if (p.executableCode) return { type: 'code', language: p.executableCode.language || 'PYTHON', code: p.executableCode.code };
+        if (p.codeExecutionResult) return { type: 'result', outcome: p.codeExecutionResult.outcome, output: p.codeExecutionResult.output };
+        if (p.inlineData) return { type: 'image', mimeType: p.inlineData.mimeType, data: p.inlineData.data };
         return null;
       })
       .filter(Boolean);
-
     yield { type: 'fullResponse', parts: structuredParts };
   }
 
-  // Grounding metadata (search sources)
   const grounding = response.candidates?.[0]?.groundingMetadata;
-  if (grounding) {
-    console.log('[Search grounding]', grounding);
-    yield { type: 'grounding', data: grounding };
-  }
+  if (grounding) yield { type: 'grounding', data: grounding };
 };
 
 // ── Function-calling chat for CSV tools ───────────────────────────────────────
-// Gemini picks a tool + args → executeFn runs it client-side (free) → Gemini
-// receives the result and returns a natural-language answer.
-//
-// executeFn(toolName, args) → plain JS object with the result
-// Returns the final text response from the model.
 
-export const chatWithCsvTools = async (history, newMessage, csvHeaders, executeFn) => {
-  const systemInstruction = await loadSystemPrompt();
+export const chatWithCsvTools = async (history, newMessage, csvHeaders, executeFn, firstName = '', lastName = '') => {
+  const basePrompt = await loadSystemPrompt();
+  const systemInstruction = buildPersonalizedPrompt(basePrompt, firstName, lastName);
   const model = genAI.getGenerativeModel({
     model: MODEL,
     tools: [{ functionDeclarations: CSV_TOOL_DECLARATIONS }],
@@ -142,10 +112,7 @@ export const chatWithCsvTools = async (history, newMessage, csvHeaders, executeF
 
   const chatHistory = systemInstruction
     ? [
-        {
-          role: 'user',
-          parts: [{ text: `Follow these instructions in every response:\n\n${systemInstruction}` }],
-        },
+        { role: 'user', parts: [{ text: `Follow these instructions in every response:\n\n${systemInstruction}` }] },
         { role: 'model', parts: [{ text: "Got it! I'll follow those instructions." }] },
         ...baseHistory,
       ]
@@ -153,42 +120,121 @@ export const chatWithCsvTools = async (history, newMessage, csvHeaders, executeF
 
   const chat = model.startChat({ history: chatHistory });
 
-  // Include column names so the model can match user intent to exact column names
   const msgWithContext = csvHeaders?.length
     ? `[CSV columns: ${csvHeaders.join(', ')}]\n\n${newMessage}`
     : newMessage;
 
   let response = (await chat.sendMessage(msgWithContext)).response;
-
-  // Accumulate chart payloads and a log of every tool call made
   const charts = [];
   const toolCalls = [];
 
-  // Function-calling loop (Gemini may chain multiple tool calls)
   for (let round = 0; round < 5; round++) {
     const parts = response.candidates?.[0]?.content?.parts || [];
     const funcCall = parts.find((p) => p.functionCall);
     if (!funcCall) break;
 
     const { name, args } = funcCall.functionCall;
-    console.log('[CSV Tool]', name, args);
     const toolResult = executeFn(name, args);
-    console.log('[CSV Tool result]', toolResult);
-
-    // Log the call for persistence
     toolCalls.push({ name, args, result: toolResult });
-
-    // Capture chart payloads so the UI can render them
-    if (toolResult?._chartType) {
-      charts.push(toolResult);
-    }
+    if (toolResult?._chartType) charts.push(toolResult);
 
     response = (
-      await chat.sendMessage([
-        { functionResponse: { name, response: { result: toolResult } } },
-      ])
+      await chat.sendMessage([{ functionResponse: { name, response: { result: toolResult } } }])
     ).response;
   }
 
   return { text: response.text(), charts, toolCalls };
+};
+
+// ── Function-calling chat for YouTube tools ───────────────────────────────────
+
+export const chatWithYoutubeTools = async (history, newMessage, videos, executeFn, imageParts = [], firstName = '', lastName = '') => {
+  const basePrompt = await loadSystemPrompt();
+  const systemInstruction = buildPersonalizedPrompt(basePrompt, firstName, lastName);
+
+  const toolDeclarations = YOUTUBE_TOOL_DECLARATIONS.filter(t => t.name !== 'generateImage');
+
+  const model = genAI.getGenerativeModel({
+    model: MODEL,
+    tools: [{ functionDeclarations: toolDeclarations }],
+  });
+
+  const baseHistory = history.map((m) => ({
+    role: m.role === 'user' ? 'user' : 'model',
+    parts: [{ text: m.content || '' }],
+  }));
+
+  const videoList = videos.slice(0, 30).map((v, i) =>
+    `${i + 1}. "${v.title}" (${Number(v.view_count).toLocaleString()} views, ${Number(v.like_count).toLocaleString()} likes)`
+  ).join('\n');
+
+  const jsonContext = `[YouTube Channel Data: ${videos.length} videos loaded]\nAvailable fields per video: ${Object.keys(videos[0] || {}).join(', ')}\n\nVideos:\n${videoList}`;
+
+  const chatHistory = systemInstruction
+    ? [
+        { role: 'user', parts: [{ text: `Follow these instructions in every response:\n\n${systemInstruction}` }] },
+        { role: 'model', parts: [{ text: "Got it! I'll follow those instructions." }] },
+        ...baseHistory,
+      ]
+    : baseHistory;
+
+  const chat = model.startChat({ history: chatHistory });
+
+  const msgWithContext = `${jsonContext}\n\n${newMessage}`;
+  const msgParts = [
+    { text: msgWithContext },
+    ...imageParts.map((img) => ({ inlineData: { mimeType: img.mimeType || 'image/png', data: img.data } })),
+  ];
+
+  let response = (await chat.sendMessage(msgParts)).response;
+  const charts = [];
+  const toolCalls = [];
+
+  for (let round = 0; round < 5; round++) {
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const funcCall = parts.find((p) => p.functionCall);
+    if (!funcCall) break;
+
+    const { name, args } = funcCall.functionCall;
+    const toolResult = executeFn(name, args);
+    toolCalls.push({ name, args, result: toolResult });
+    if (toolResult?._chartType) charts.push(toolResult);
+
+    response = (
+      await chat.sendMessage([{ functionResponse: { name, response: { result: toolResult } } }])
+    ).response;
+  }
+
+  return { text: response.text(), charts, toolCalls };
+};
+
+// ── Image generation via Gemini ───────────────────────────────────────────────
+
+export const generateImageWithGemini = async (prompt, anchorImageParts = []) => {
+  const model = genAI.getGenerativeModel({
+    model: IMAGE_MODEL,
+    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+  });
+
+  const parts = [
+    { text: `Generate an image based on this description: ${prompt}` },
+    ...anchorImageParts.map((img) => ({
+      inlineData: { mimeType: img.mimeType || 'image/png', data: img.data },
+    })),
+  ];
+
+  const response = await model.generateContent(parts);
+  const resultParts = response.response.candidates?.[0]?.content?.parts || [];
+
+  for (const part of resultParts) {
+    if (part.inlineData) {
+      return {
+        mimeType: part.inlineData.mimeType,
+        data: part.inlineData.data,
+      };
+    }
+  }
+
+  const textPart = resultParts.find(p => p.text);
+  return { error: textPart?.text || 'No image was generated. Try a different prompt.' };
 };

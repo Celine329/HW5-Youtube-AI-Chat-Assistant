@@ -3,10 +3,19 @@ const express = require('express');
 const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
+const { google } = require('googleapis');
+const { YoutubeTranscript } = require('youtube-transcript');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+const youtube = google.youtube({
+  version: 'v3',
+  auth: process.env.YOUTUBE_API_KEY || process.env.REACT_APP_GEMINI_API_KEY,
+});
 
 const URI = process.env.REACT_APP_MONGODB_URI || process.env.MONGODB_URI || process.env.REACT_APP_MONGO_URI;
 const DB = 'chatapp';
@@ -47,7 +56,7 @@ app.get('/api/status', async (req, res) => {
 
 app.post('/api/users', async (req, res) => {
   try {
-    const { username, password, email } = req.body;
+    const { username, password, email, firstName, lastName } = req.body;
     if (!username || !password)
       return res.status(400).json({ error: 'Username and password required' });
     const name = String(username).trim().toLowerCase();
@@ -58,6 +67,8 @@ app.post('/api/users', async (req, res) => {
       username: name,
       password: hashed,
       email: email ? String(email).trim().toLowerCase() : null,
+      firstName: firstName ? String(firstName).trim() : '',
+      lastName: lastName ? String(lastName).trim() : '',
       createdAt: new Date().toISOString(),
     });
     res.json({ ok: true });
@@ -76,7 +87,7 @@ app.post('/api/users/login', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'User not found' });
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Invalid password' });
-    res.json({ ok: true, username: name });
+    res.json({ ok: true, username: name, firstName: user.firstName || '', lastName: user.lastName || '' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -201,6 +212,153 @@ app.get('/api/messages', async (req, res) => {
       };
     });
     res.json(msgs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── YouTube Channel Download (SSE for progress) ─────────────────────────────
+
+async function resolveChannelId(input) {
+  const handleMatch = input.match(/@([\w.-]+)/);
+  if (handleMatch) {
+    const res = await youtube.search.list({
+      part: 'snippet',
+      q: handleMatch[1],
+      type: 'channel',
+      maxResults: 1,
+    });
+    if (res.data.items?.length) return res.data.items[0].snippet.channelId;
+  }
+  const idMatch = input.match(/channel\/(UC[\w-]+)/);
+  if (idMatch) return idMatch[1];
+  const res = await youtube.search.list({
+    part: 'snippet',
+    q: input,
+    type: 'channel',
+    maxResults: 1,
+  });
+  if (res.data.items?.length) return res.data.items[0].snippet.channelId;
+  return null;
+}
+
+async function getChannelVideos(channelId, maxVideos) {
+  const videoIds = [];
+  let pageToken = '';
+  while (videoIds.length < maxVideos) {
+    const res = await youtube.search.list({
+      part: 'id',
+      channelId,
+      order: 'date',
+      type: 'video',
+      maxResults: Math.min(50, maxVideos - videoIds.length),
+      pageToken: pageToken || undefined,
+    });
+    for (const item of (res.data.items || [])) {
+      if (item.id?.videoId) videoIds.push(item.id.videoId);
+    }
+    pageToken = res.data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return videoIds.slice(0, maxVideos);
+}
+
+async function getVideoDetails(videoIds) {
+  const details = [];
+  for (let i = 0; i < videoIds.length; i += 50) {
+    const batch = videoIds.slice(i, i + 50);
+    const res = await youtube.videos.list({
+      part: 'snippet,contentDetails,statistics',
+      id: batch.join(','),
+    });
+    details.push(...(res.data.items || []));
+  }
+  return details;
+}
+
+function parseDuration(iso) {
+  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  if (!m) return 0;
+  return (parseInt(m[1] || 0) * 3600) + (parseInt(m[2] || 0) * 60) + parseInt(m[3] || 0);
+}
+
+async function fetchTranscript(videoId) {
+  try {
+    const t = await YoutubeTranscript.fetchTranscript(videoId);
+    return t.map(s => s.text).join(' ');
+  } catch {
+    return null;
+  }
+}
+
+app.get('/api/youtube/download', async (req, res) => {
+  const { channelUrl, maxVideos: maxStr } = req.query;
+  const maxVideos = Math.min(parseInt(maxStr) || 10, 100);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  try {
+    send({ type: 'status', message: 'Resolving channel...' });
+    const channelId = await resolveChannelId(channelUrl);
+    if (!channelId) {
+      send({ type: 'error', message: 'Could not find channel. Check the URL.' });
+      return res.end();
+    }
+
+    const channelInfo = await youtube.channels.list({ part: 'snippet', id: channelId });
+    const channelTitle = channelInfo.data.items?.[0]?.snippet?.title || 'Unknown';
+    send({ type: 'status', message: `Found channel: ${channelTitle}. Fetching video list...` });
+
+    const videoIds = await getChannelVideos(channelId, maxVideos);
+    send({ type: 'status', message: `Found ${videoIds.length} videos. Fetching details...` });
+
+    const details = await getVideoDetails(videoIds);
+    const videos = [];
+
+    for (let i = 0; i < details.length; i++) {
+      const v = details[i];
+      send({ type: 'progress', current: i + 1, total: details.length, title: v.snippet.title });
+
+      const transcript = await fetchTranscript(v.id);
+
+      videos.push({
+        video_id: v.id,
+        title: v.snippet.title,
+        description: v.snippet.description,
+        thumbnail: v.snippet.thumbnails?.high?.url || v.snippet.thumbnails?.default?.url || '',
+        published_at: v.snippet.publishedAt,
+        duration_seconds: parseDuration(v.contentDetails.duration),
+        view_count: parseInt(v.statistics.viewCount || 0),
+        like_count: parseInt(v.statistics.likeCount || 0),
+        comment_count: parseInt(v.statistics.commentCount || 0),
+        video_url: `https://www.youtube.com/watch?v=${v.id}`,
+        transcript: transcript,
+      });
+    }
+
+    const result = { channel: channelTitle, channel_id: channelId, downloaded_at: new Date().toISOString(), videos };
+    send({ type: 'complete', data: result });
+  } catch (err) {
+    console.error('YouTube download error:', err);
+    send({ type: 'error', message: err.message || 'Download failed' });
+  }
+  res.end();
+});
+
+// Endpoint to save channel JSON to public folder
+app.post('/api/youtube/save', async (req, res) => {
+  try {
+    const { filename, data } = req.body;
+    const safeName = (filename || 'channel_data').replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+    const publicDir = path.join(__dirname, '..', 'public');
+    fs.writeFileSync(path.join(publicDir, safeName), JSON.stringify(data, null, 2));
+    res.json({ ok: true, filename: safeName });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
