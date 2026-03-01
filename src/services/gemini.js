@@ -4,8 +4,8 @@ import { YOUTUBE_TOOL_DECLARATIONS } from './youtubeTools';
 
 const genAI = new GoogleGenerativeAI(process.env.REACT_APP_GEMINI_API_KEY || '');
 
-const MODEL = 'gemini-2.0-flash';
-const IMAGE_MODEL = 'gemini-2.0-flash-exp';
+const MODEL = 'gemini-2.5-flash';
+const IMAGE_MODEL = 'gemini-2.0-flash-exp-image-generation';
 
 const SEARCH_TOOL = { googleSearch: {} };
 const CODE_EXEC_TOOL = { codeExecution: {} };
@@ -216,7 +216,7 @@ export const chatWithYoutubeTools = async (history, newMessage, videos, executeF
 // ── Image generation via Gemini ───────────────────────────────────────────────
 
 export const generateImageWithGemini = async (prompt, anchorImageParts = []) => {
-  const models = [IMAGE_MODEL, 'gemini-2.0-flash'];
+  const models = [IMAGE_MODEL, 'gemini-2.5-flash'];
 
   for (const modelName of models) {
     try {

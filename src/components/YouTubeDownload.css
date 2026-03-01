@@ -1,0 +1,248 @@
+.yt-download-layout {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem;
+  background: #0a0a1a;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.yt-download-card {
+  width: 100%;
+  max-width: 720px;
+  background: rgba(20, 20, 40, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 2rem;
+  backdrop-filter: blur(20px);
+}
+
+.yt-download-header h2 {
+  color: #fff;
+  margin: 0 0 0.5rem;
+  font-size: 1.4rem;
+}
+
+.yt-download-subtitle {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.88rem;
+  margin: 0 0 1.5rem;
+}
+
+.yt-download-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.yt-label {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.yt-input {
+  padding: 0.7rem 1rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 0.95rem;
+  font-family: 'Inter', sans-serif;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.yt-input:focus {
+  border-color: #818cf8;
+}
+
+.yt-input-short {
+  max-width: 120px;
+}
+
+.yt-download-btn {
+  margin-top: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #818cf8, #6366f1);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.yt-download-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.yt-download-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.yt-progress-section {
+  margin-top: 1.5rem;
+}
+
+.yt-status {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+
+.yt-progress-bar-wrap {
+  position: relative;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.yt-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #818cf8, #6366f1);
+  border-radius: 12px;
+  transition: width 0.3s ease;
+}
+
+.yt-progress-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.yt-error {
+  color: #f87171;
+  font-size: 0.85rem;
+  margin-top: 1rem;
+  padding: 0.6rem 1rem;
+  background: rgba(248, 113, 113, 0.08);
+  border-radius: 8px;
+}
+
+.yt-result-section {
+  margin-top: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 1.5rem;
+}
+
+.yt-result-section h3 {
+  color: #fff;
+  margin: 0 0 0.3rem;
+}
+
+.yt-result-section > p {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.85rem;
+  margin: 0 0 1rem;
+}
+
+.yt-video-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+}
+
+.yt-video-item {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.yt-thumb {
+  width: 80px;
+  height: 45px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.yt-video-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.yt-video-title {
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.yt-video-meta {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.75rem;
+}
+
+.yt-result-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.yt-action-btn {
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #818cf8, #6366f1);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.yt-action-btn.secondary {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.yt-action-btn:hover {
+  opacity: 0.85;
+}
+
+.yt-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.yt-username {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.82rem;
+}
+
+.yt-logout {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.6);
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.yt-logout:hover {
+  color: #f87171;
+  border-color: #f87171;
+}

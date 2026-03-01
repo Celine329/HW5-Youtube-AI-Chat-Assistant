@@ -20,10 +20,31 @@ const DB = 'chatapp';
 
 let db;
 
-async function connect() {
-  const client = await MongoClient.connect(URI);
-  db = client.db(DB);
-  console.log('MongoDB connected');
+async function connect(retries = 5) {
+  for (let i = 1; i <= retries; i++) {
+    try {
+      const client = await MongoClient.connect(URI, {
+        serverSelectionTimeoutMS: 10000,
+        connectTimeoutMS: 10000,
+      });
+      db = client.db(DB);
+      console.log('MongoDB connected');
+      return;
+    } catch (err) {
+      console.error(`MongoDB connection attempt ${i}/${retries} failed:`, err.message);
+      if (i < retries) {
+        const delay = Math.min(2000 * i, 10000);
+        console.log(`Retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  console.error('All MongoDB connection attempts failed. Server will run without DB — auth endpoints will return 503.');
+}
+
+function requireDb(req, res, next) {
+  if (!db) return res.status(503).json({ error: 'Database unavailable — still connecting. Please try again shortly.' });
+  next();
 }
 
 app.get('/', (req, res) => {
@@ -41,10 +62,11 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/status', async (req, res) => {
+  if (!db) return res.json({ db: false, message: 'MongoDB connecting...' });
   try {
     const usersCount = await db.collection('users').countDocuments();
     const sessionsCount = await db.collection('sessions').countDocuments();
-    res.json({ usersCount, sessionsCount });
+    res.json({ db: true, usersCount, sessionsCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -52,7 +74,7 @@ app.get('/api/status', async (req, res) => {
 
 // ── Users ────────────────────────────────────────────────────────────────────
 
-app.post('/api/users', async (req, res) => {
+app.post('/api/users', requireDb, async (req, res) => {
   try {
     const { username, password, email, firstName, lastName } = req.body;
     if (!username || !password)
@@ -75,7 +97,7 @@ app.post('/api/users', async (req, res) => {
   }
 });
 
-app.post('/api/users/login', async (req, res) => {
+app.post('/api/users/login', requireDb, async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password)
@@ -93,7 +115,7 @@ app.post('/api/users/login', async (req, res) => {
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
-app.get('/api/sessions', async (req, res) => {
+app.get('/api/sessions', requireDb, async (req, res) => {
   try {
     const { username } = req.query;
     if (!username) return res.status(400).json({ error: 'username required' });
@@ -116,7 +138,7 @@ app.get('/api/sessions', async (req, res) => {
   }
 });
 
-app.post('/api/sessions', async (req, res) => {
+app.post('/api/sessions', requireDb, async (req, res) => {
   try {
     const { username, agent } = req.body;
     if (!username) return res.status(400).json({ error: 'username required' });
@@ -134,7 +156,7 @@ app.post('/api/sessions', async (req, res) => {
   }
 });
 
-app.delete('/api/sessions/:id', async (req, res) => {
+app.delete('/api/sessions/:id', requireDb, async (req, res) => {
   try {
     await db.collection('sessions').deleteOne({ _id: new ObjectId(req.params.id) });
     res.json({ ok: true });
@@ -143,7 +165,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
   }
 });
 
-app.patch('/api/sessions/:id/title', async (req, res) => {
+app.patch('/api/sessions/:id/title', requireDb, async (req, res) => {
   try {
     const { title } = req.body;
     await db.collection('sessions').updateOne(
@@ -158,7 +180,7 @@ app.patch('/api/sessions/:id/title', async (req, res) => {
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
-app.post('/api/messages', async (req, res) => {
+app.post('/api/messages', requireDb, async (req, res) => {
   try {
     const { session_id, role, content, imageData, charts, toolCalls } = req.body;
     if (!session_id || !role || content === undefined)
@@ -183,7 +205,7 @@ app.post('/api/messages', async (req, res) => {
   }
 });
 
-app.get('/api/messages', async (req, res) => {
+app.get('/api/messages', requireDb, async (req, res) => {
   try {
     const { session_id } = req.query;
     if (!session_id) return res.status(400).json({ error: 'session_id required' });
@@ -358,11 +380,20 @@ app.get('/api/youtube/download', async (req, res) => {
   res.end();
 });
 
-// Endpoint to save channel JSON to public folder
-app.post('/api/youtube/save', async (req, res) => {
+// Endpoint to save channel JSON to public folder (requires authenticated username)
+app.post('/api/youtube/save', requireDb, async (req, res) => {
   try {
-    const { filename, data } = req.body;
+    const { filename, data, username } = req.body;
+    if (!username) return res.status(401).json({ error: 'Authentication required' });
+
+    const user = await db.collection('users').findOne({ username: username.trim().toLowerCase() });
+    if (!user) return res.status(401).json({ error: 'Invalid user' });
+
     const safeName = (filename || 'channel_data').replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+
+    const PROTECTED = new Set(['prompt_chat.txt', 'index.html', 'manifest.json', 'robots.txt']);
+    if (PROTECTED.has(safeName)) return res.status(403).json({ error: 'Cannot overwrite protected file' });
+
     const publicDir = path.join(__dirname, '..', 'public');
     fs.writeFileSync(path.join(publicDir, safeName), JSON.stringify(data, null, 2));
     res.json({ ok: true, filename: safeName });
@@ -375,11 +406,7 @@ app.post('/api/youtube/save', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-connect()
-  .then(() => {
-    app.listen(PORT, () => console.log(`Server on http://localhost:${PORT}`));
-  })
-  .catch((err) => {
-    console.error('MongoDB connection failed:', err.message);
-    process.exit(1);
-  });
+app.listen(PORT, () => {
+  console.log(`Server on http://localhost:${PORT}`);
+  connect().catch(() => {});
+});
